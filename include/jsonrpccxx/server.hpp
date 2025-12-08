@@ -2,15 +2,25 @@
 
 #include "common.hpp"
 #include "dispatcher.hpp"
+#include <functional>
 #include <string>
 
 namespace jsonrpccxx {
   class JsonRpcServer {
   public:
-    JsonRpcServer() : dispatcher() {}
+    struct ErrorInfo {
+      json data;
+      int code;
+      std::string message;
+    };
+
+    using ErrorNotification = std::function<void(const ErrorInfo &info)>;
+
+    JsonRpcServer() : dispatcher(), error_notification() {}
     virtual ~JsonRpcServer() = default;
     virtual std::string HandleRequest(const std::string &request) = 0;
 
+    void SetErrorNotification(const ErrorNotification &notification) { error_notification = notification; }
     bool Add(const std::string &name, MethodHandle callback, const NamedParamMapping &mapping = NAMED_PARAM_MAPPING) {
       if (name.rfind("rpc.", 0) == 0)
         return false;
@@ -24,6 +34,7 @@ namespace jsonrpccxx {
 
   protected:
     Dispatcher dispatcher;
+    ErrorNotification error_notification;
   };
 
   class JsonRpc2Server : public JsonRpcServer {
@@ -51,9 +62,16 @@ namespace jsonrpccxx {
             return "";
           }
         } else {
-          return json{{"id", nullptr}, {"error", {{"code", invalid_request}, {"message", "invalid request: expected array or object"}}}, {"jsonrpc", "2.0"}}.dump();
+          if (error_notification) {
+            error_notification({nullptr, invalid_request, "error: expected array or object"});
+          }
+          return json{{"id", nullptr}, {"error", {{"code", invalid_request}, {"message", "invalid request: expected array or object"}}}, {"jsonrpc", "2.0"}}
+              .dump();
         }
-      } catch (json::parse_error &e) {
+      } catch (const json::parse_error &e) {
+        if (error_notification) {
+          error_notification({nullptr, parse_error, e.what()});
+        }
         return json{{"id", nullptr}, {"error", {{"code", parse_error}, {"message", std::string("parse error: ") + e.what()}}}, {"jsonrpc", "2.0"}}.dump();
       }
     }
@@ -66,15 +84,24 @@ namespace jsonrpccxx {
       }
       try {
         return ProcessSingleRequest(request);
-      } catch (JsonRpcException &e) {
+      } catch (const JsonRpcException &e) {
         json error = {{"code", e.Code()}, {"message", e.Message()}};
         if (!e.Data().is_null()) {
           error["data"] = e.Data();
         }
+        if (error_notification) {
+          error_notification({request, e.Code(), e.Message()});
+        }
         return json{{"id", id}, {"error", error}, {"jsonrpc", "2.0"}};
-      } catch (std::exception &e) {
+      } catch (const std::exception &e) {
+        if (error_notification) {
+          error_notification({request, internal_error, e.what()});
+        }
         return json{{"id", id}, {"error", {{"code", internal_error}, {"message", std::string("internal server error: ") + e.what()}}}, {"jsonrpc", "2.0"}};
       } catch (...) {
+        if (error_notification) {
+          error_notification({request, internal_error, std::string("error: Unknown exception")});
+        }
         return json{{"id", id}, {"error", {{"code", internal_error}, {"message", std::string("internal server error")}}}, {"jsonrpc", "2.0"}};
       }
     }
@@ -98,13 +125,19 @@ namespace jsonrpccxx {
       if (!has_key(request, "id")) {
         try {
           dispatcher.InvokeNotification(request["method"], request["params"]);
-          return json();
-        } catch (std::exception &) {
-          return json();
+        } catch (const std::exception &e) {
+          if (error_notification) {
+            error_notification({request, internal_error, e.what()});
+          }
+        } catch (...) {
+          if (error_notification) {
+            error_notification({request, internal_error, std::string("Unknown exception")});
+          }
         }
+        return json();
       } else {
         return {{"jsonrpc", "2.0"}, {"id", request["id"]}, {"result", dispatcher.InvokeMethod(request["method"], request["params"])}};
       }
     }
   };
-}
+} // namespace jsonrpccxx
