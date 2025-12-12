@@ -146,6 +146,7 @@ TEST_CASE_FIXTURE(Server2, "v2_invocations") {
 
   connector.CallNotification("dirty_notification", nullptr);
   connector.VerifyNotificationResult();
+  connector.VerifyNotificationServerError(-32603, "internal server error");
   connector.CallMethod(1, "dirty_method", {{"a", 3}, {"b", 0}});
   connector.VerifyMethodError(-32603, "internal server error", 1);
   connector.CallMethod(1, "div_function", {{"a", 3}, {"b", 0}});
